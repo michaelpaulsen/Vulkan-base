@@ -47,6 +47,7 @@ class Application {
     std::vector<VkSemaphore> imageAvailableSemaphores, renderFinishedSemaphores;
     std::vector<VkFence> inFlightFences;
     const int WIDTH = 800, HEIGHT = 600;
+    bool framebufferResized = false;
     const std::vector<const char*> vu_validationLayers = {
         "VK_LAYER_KHRONOS_validation"
     };
@@ -141,7 +142,8 @@ class Application {
             createInfo.queueFamilyIndexCount = 0; // Optional
             createInfo.pQueueFamilyIndices = nullptr; // Optional
         }
-        if (vkCreateSwapchainKHR(vu_logicalDevice, &createInfo, nullptr, &swapChain) != VK_SUCCESS) {
+        auto result = vkCreateSwapchainKHR(vu_logicalDevice, &createInfo, nullptr, &swapChain); 
+        if (result  != VK_SUCCESS) {
             throw std::runtime_error("failed to create swap chain!");
         }
         vkGetSwapchainImagesKHR(vu_logicalDevice, swapChain, &imageCount, nullptr);
@@ -151,6 +153,19 @@ class Application {
         swapChainExtent = extent;
     }
     
+    void recreateSwapChain() {
+        int width = 0, height = 0;
+        glfwGetFramebufferSize(window, &width, &height);
+        while (width == 0 || height == 0) {
+            glfwGetFramebufferSize(window, &width, &height);
+            glfwWaitEvents();
+        }
+        vkDeviceWaitIdle(vu_logicalDevice);
+        cleanupSwapChain();
+        createSwapChain();
+        createImageViews();
+        createFramebuffers();
+    }
     void createImageViews() {
         swapChainImageViews.resize(swapChainImages.size());
         for (size_t i = 0; i < swapChainImages.size(); i++) {
@@ -338,11 +353,7 @@ class Application {
 #endif // !_DEBUG
 
     }
-    static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
-        VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
-        VkDebugUtilsMessageTypeFlagsEXT messageType,
-        const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
-        void* pUserData) {
+    static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback( VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageType,const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData) {
         if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT || messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) std::cout << "[INFO]";
         if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)std::cout << "[WARN]";
         if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)std::cout << "[ERROR]";
@@ -661,12 +672,25 @@ class Application {
             throw std::runtime_error("failed to record command buffer!");
         }
     }
-    
+    void cleanupSwapChain() {
+        for (auto fbuffer : swapChainFramebuffers) {
+            vkDestroyFramebuffer(vu_logicalDevice, fbuffer, 0);
+        }
+        for (auto imageView : swapChainImageViews) {
+            vkDestroyImageView(vu_logicalDevice, imageView, nullptr);
+        }
+        vkDestroySwapchainKHR(vu_logicalDevice, swapChain, nullptr);
+
+    }
     void drawFrame() {
         vkWaitForFences(vu_logicalDevice, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
-        vkResetFences(vu_logicalDevice, 1, &inFlightFences[currentFrame]);
         uint32_t imageIndex;
-        vkAcquireNextImageKHR(vu_logicalDevice, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+        auto result = vkAcquireNextImageKHR(vu_logicalDevice, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+            recreateSwapChain(); 
+            return; 
+        }
+        vkResetFences(vu_logicalDevice, 1, &inFlightFences[currentFrame]);
         vkResetCommandBuffer(commandBuffers[currentFrame], 0);
         recordCommandBuffer(commandBuffers[currentFrame], imageIndex);
         VkSubmitInfo submitInfo{};
@@ -695,7 +719,12 @@ class Application {
         presentInfo.swapchainCount = 1;
         presentInfo.pSwapchains = swapChains;
         presentInfo.pImageIndices = &imageIndex;
-        vkQueuePresentKHR(presentQueue, &presentInfo);
+        result = vkQueuePresentKHR(presentQueue, &presentInfo);
+        if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized) {
+            framebufferResized = false;
+            recreateSwapChain();
+            return; 
+        }
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT; 
     }
     void createSyncObjects() {
@@ -716,13 +745,19 @@ class Application {
             }
         }
     }
+    static void framebufferResizeCallback(GLFWwindow* window, int width, int height) {
+        auto app = reinterpret_cast<Application*>(glfwGetWindowUserPointer(window));
+        app->framebufferResized = true;
+    }
 public:
     Application() {
 
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+        //glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
         window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
+        glfwSetWindowUserPointer(window, this);
+        glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
         createInstance();
         if (glfwCreateWindowSurface(vu_instance, window, nullptr, &surface) != VK_SUCCESS) {
             throw std::runtime_error("Unable to create surface");
@@ -748,17 +783,11 @@ public:
             vkDestroyFence(vu_logicalDevice, inFlightFences[i], nullptr);
         }
         vkDestroyCommandPool(vu_logicalDevice, commandPool, 0);
-        for (auto fbuffer : swapChainFramebuffers) {
-            vkDestroyFramebuffer(vu_logicalDevice,fbuffer,0); 
-        }
+        
         vkDestroyPipeline(vu_logicalDevice, graphicsPipeline, nullptr);
         vkDestroyPipelineLayout(vu_logicalDevice, pipelineLayout, nullptr);
         vkDestroyRenderPass(vu_logicalDevice, renderPass, nullptr);
-        for (auto imageView : swapChainImageViews) {
-
-            vkDestroyImageView(vu_logicalDevice, imageView, nullptr);
-        }
-        vkDestroySwapchainKHR(vu_logicalDevice, swapChain, nullptr);
+        cleanupSwapChain();
         vkDestroySurfaceKHR(vu_instance, surface, nullptr);
         vkDestroyDevice(vu_logicalDevice, nullptr);
 #if _DEBUG 
